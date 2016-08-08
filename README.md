@@ -13,3 +13,5 @@ v0.4:2016/8/7 fix binding bug, add new interfaces
 todo:
 
 add detection of table insert and table remove
+
+add detection of any value change inside one table
