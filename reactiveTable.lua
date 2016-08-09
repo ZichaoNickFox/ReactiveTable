@@ -1,6 +1,8 @@
 --[[
 - reactiveTable.lua is licensed as follows:
 
+MIT license
+
 Copyright (c) 2016 zichao.liu and kaixin001 Corporation 
 
 Permission is hereby granted, free of charge, to any person
@@ -33,14 +35,16 @@ versions:
 	v0.2:2016/8/4 upgrade table changing detection and finish binding
 	v0.3:2016/8/5 fix bug
 	v0.4:2016/8/7 fix binding bug, add new interfaces
+    v0.5:2016/8/9 big refactor and merge test with examples
 ]]
 
 -- public binding interface:
 ------------------------------------------------------------------------------------------
 -- getReactiveTable([initTable])
--- bindVariableChange(reactiveTable, bindingString, callback)
--- unbindVariableChange(reactiveTable, bindingString)
--- unbindAllVariableChange(reactiveTable)
+-- bindValueChange(reactiveTable, bindingString, callback)
+-- unbindValueChange(reactiveTable, bindingString, [callback])
+-- bindTableModify(reactiveTable, bindingString, callback)
+-- unbindTableModify(reactiveTable, bindingString, [callback])
 ------------------------------------------------------------------------------------------
 
 -- public table interface:
@@ -64,6 +68,20 @@ local function getRealTable(t)
 	else
 		return t
 	end
+end
+
+local function revertStringNumber(k)
+    if type(k) == "string" and string.sub(k, 1, 1) == '\"' and string.sub(k, string.len(k), string.len(k)) == "\"" then
+        k = string.sub(k, 2, string.len(k) - 1)
+    end
+    return k
+end
+
+local function revertNumber(k)
+    if type(k) == "string" and tonumber(k) ~= nil then
+        k = tonumber(k)
+    end
+    return k
 end
 
 local function getDumpStr(t)
@@ -90,10 +108,10 @@ local function getDumpStr(t)
             k = type(k) == "string" and "\"" .. k .. "\"" or k
             v = type(v) == "string" and "\"" .. v .. "\"" or v
             if type(v) == "table" then
-                ret = ret .. getIndentString(indent + 1) .. k .. " = {\n"
+                ret = ret .. getIndentString(indent + 1) .. tostring(k) .. " = {\n"
                 printTable(v, indent + 1)
             else
-                ret = ret .. getIndentString(indent + 1) .. k .. " = " .. tostring(v) .. "\n"
+                ret = ret .. getIndentString(indent + 1) .. tostring(k) .. " = " .. tostring(v) .. "\n"
             end
         end
         ret = ret .. getIndentString(indent) .. "}\n"
@@ -102,27 +120,14 @@ local function getDumpStr(t)
     return ret
 end
 
-local function revertStringNumber(k)
-    if type(k) == "string" and string.sub(k, 1, 1) == '\"' and string.sub(k, string.len(k), string.len(k)) == "\"" then
-        k = string.sub(k, 2, string.len(k) - 1)
-    end
-    return k
-end
-
-local function revertNumber(k)
-    if type(k) == "string" and tonumber(k) ~= nil then
-        k = tonumber(k)
-    end
-    return k
-end
-
 -- print all the tables or values, 
 -- nil example:
 -- input: dump(nil,nil,1) -- output: nil nil 1
 -- input: dump(1, nil, nil) -- output: 1
 -- return targetString for test
 function rt.dump(...)
-	if table.maxn(arg) == 0 then
+    arg = {...}
+	if arg and table.maxn(arg) == 0 then
 		print("all_are_nil")
 		return
 	end
@@ -182,17 +187,6 @@ function rt.pairs(t)
     end
 end
 
--- function rt.insert(t, pos, v)
--- 	local rt = reactive.getRealTable(t)
--- 	-- three params
--- 	if v then
--- 		table.insert(rt, pos, v)
--- 	else	-- two params
--- 		v = pos
--- 		table.insert(rt, v)
--- 	end
--- end
-
 -- binding interface
 ------------------------------------------------------------------------------------------
 -- iterator
@@ -237,7 +231,7 @@ local function isBindingEnd(bindingString)
     end
 end
 
--- reactiveMetaTable.__bindingTable must be coordinate with bindingString
+-- reactiveMetaTable.__valueChangeBindingTable must be coordinate with bindingString
 local function IterToEnd(reactiveMetaTable, bindingString, func)
 	-- maybe bind future table, so reactiveMetaTable may be nil
 	if reactiveMetaTable == nil then
@@ -273,11 +267,11 @@ local function getBindingEnd(reactiveMetaTable, bindingString)
 	else
 		local key = getNextBindingKey(bindingString)
 		local realTable = reactiveMetaTable.__realTable
-		local childTable = realTable[key]
-		if childTable == nil then
+		local subTable = realTable[key]
+		if subTable == nil then
 			return getBindingEnd(nil, bindingString)
 		else
-			reactiveMetaTable = getmetatable(childTable)
+			reactiveMetaTable = getmetatable(subTable)
 			return getBindingEnd(reactiveMetaTable, cutBindingString(bindingString))
 		end
 	end 
@@ -306,57 +300,65 @@ local function getBindingRoot(reactiveMetaTable, bindingString)
 end
 
 -- insert new binding string from any level of a table tree
-local function InsertVariableChangeBinding(reactiveMetaTable, bindingString, coreCallback)
-	local rootReactiveMetaTable, rootBindString = getBindingRoot(reactiveMetaTable, bindingString)
+local function InsertValueChangeBinding(reactiveMetaTable, bindingString, callback)
+    local rootReactiveMetaTable, rootBindingString = getBindingRoot(reactiveMetaTable, bindingString)
 
 	IterToEnd(
 		rootReactiveMetaTable, 
-		rootBindString,
+		rootBindingString,
 		function(reactiveMetaTable, bindingString)
-			-- add to bindingTable, ingore whether there is a key, because the key may have in future
-			local bindingTable = reactiveMetaTable.__bindingTable
-			reactiveMetaTable.__bindingTable[tostring(bindingString)] = coreCallback
+			-- add to valueChangeBindingTable, ingore whether there is a key, because the key may have in future
+			local valueChangeBindingTable = reactiveMetaTable.__valueChangeBindingTable
+            if not reactiveMetaTable.__valueChangeBindingTable[tostring(bindingString)] then
+                reactiveMetaTable.__valueChangeBindingTable[tostring(bindingString)] = {}
+            end
+			reactiveMetaTable.__valueChangeBindingTable[tostring(bindingString)][callback] = true
 		end
 		)
 end
 
-local function DeleteBindingForChildTables(reactiveMetaTable, unbindingString)
-	local bindingTable = reactiveMetaTable.__bindingTable
+local function DeleteBindingForSubTables(reactiveMetaTable, unbindingString, callback)
+	local valueChangeBindingTable = reactiveMetaTable.__valueChangeBindingTable
 	local realTable = reactiveMetaTable.__realTable
 
-	for k,v in pairs(bindingTable) do
+	for k,v in pairs(valueChangeBindingTable) do
 		if k == unbindingString then
-			bindingTable[tostring(k)] = nil
+            if callback then
+		        valueChangeBindingTable[tostring(k)][callback] = nil
+            else
+                valueChangeBindingTable[tostring(k)] = nil
+            end
 		end
 	end
-	unbindingString = cutBindingString(unbindingString)
-	if unbindingString ~= "" then
-		DeleteBindingForChildTables(realTable[getNextBindingKey(unbindingString)], unbindingString)
+    local subTable = realTable[getNextBindingKey(unbindingString)]
+    local subBindingString = cutBindingString(unbindingString)
+	if subBindingString ~= "" then
+		DeleteBindingForSubTables(getmetatable(subTable), subBindingString, callback)
 	end
 end
 
-local function DeleteBinding(reactiveMetaTable, unbindingString)
-	local rootReactiveMetaTable, rootBindString = getBindingRoot(reactiveMetaTable, unbindingString)
-	DeleteBindingForChildTables(reactiveMetaTable, unbindingString)
+local function DeleteBinding(reactiveMetaTable, unbindingString, callback)
+	local rootReactiveMetaTable, rootBindingString = getBindingRoot(reactiveMetaTable, unbindingString)
+	DeleteBindingForSubTables(reactiveMetaTable, unbindingString, callback)
 end
 
 local function DeleteAllBindings(reactiveMetaTable)
-	for k,v in pairs(reactiveMetaTable.__bindingTable) do
+	for k,v in pairs(reactiveMetaTable.__valueChangeBindingTable) do
 		if isBindingEnd(k) then
 			DeleteBinding(reactiveMetaTable, k)
 		end
 	end
 end
 
-local function buildChildBindingTable(reactiveMetaTable)
-	for k,v in pairs(reactiveMetaTable.__bindingTable) do
-		local callback = reactiveMetaTable.__bindingTable[k]
+local function buildSubTableBuidingTable(reactiveMetaTable)
+	for k,v in pairs(reactiveMetaTable.__valueChangeBindingTable) do
+		local callbacks = reactiveMetaTable.__valueChangeBindingTable[k]
 
 		IterToEnd(
 			reactiveMetaTable,
 			k,
 			function(iterReactiveMetaTable, iterKey)
-				iterReactiveMetaTable.__bindingTable[iterKey] = callback
+				iterReactiveMetaTable.__valueChangeBindingTable[iterKey] = callbacks
 			end
 			)
 	end
@@ -381,32 +383,34 @@ end
 -- @ return a pseudo table(always empty) for users 
 function rt.getReactiveTable(initTable)
     -- we use this table to store real data
-    -- the table this function returns is a pseudo table which always be nil
     local realTable = {}
 
     -- this table is used to record user visible table 
     local reactiveTable = {}
 
-    -- this table is used to store observable changing strings
-    local bindingTable = {}
+    -- this table is used for storing v changing strings
+    local valueChangeBindingTable = {}
+
+    -- this table is used for storing 
+    local tableModifyBindingTable = {}
 
     -- some code only do once in outermost layer recursive function
     local stackLevel = 0
-    
-    -- record old bindingValue
-    local oldBindingValue = {}
 
+    -- record this value updating
+    local thisUpdateValueChangeCallbackRecord = {}
+    
     -- there are 5 tables:
     -- realTable: store real data
     -- reactiveTable: give user, always empty, __newindex = function(t,k,v), the "t" is reactiveTable
-    -- bindingTable : store bindingStrings.
+    -- valueChangeBindingTable : store bindingStrings.
     -- parentTable : parent reactiveMetaTable
     -- keyInParentTable : parent key toward this table
     -- reactiveMetaTable : store all message, use getmetatable(reactiveTable) get
     setmetatable(reactiveTable, {
         __realTable = realTable,
         __reactiveTable = reactiveTable,
-        __bindingTable = bindingTable,
+        __valueChangeBindingTable = valueChangeBindingTable,
         __keyInParentTable = nil,
         __parentMetaTable = nil,
         __index = function(t, k)
@@ -418,100 +422,67 @@ function rt.getReactiveTable(initTable)
         end,
         -- t is __reactiveTable
         __newindex = function(t, k, v)
-        	local function storeOldBindingValue(reactiveTable)
-        		-- store all old binding value
-            	local reactiveMetaTable = getmetatable(reactiveTable)
-            	local bindingTable = reactiveMetaTable.__bindingTable
-            	for k,v in pairs(bindingTable) do
-            		local bindingEnd = getBindingEnd(reactiveMetaTable, k)
-            		local arrivable, endReactiveMetaTable, bindingKey, bindingValue = bindingEnd.arrivable, bindingEnd.reactiveMetaTable, bindingEnd.bindingKey, bindingEnd.bindingValue 
-					oldBindingValue[k] = {
-						arrivable, 
-						endReactiveMetaTable, 
-						bindingKey, 
-						bindingValue
-					}
-            	end
-        	end
+            local function insertIntoThisUpdateValueChangeCallbackTable(oldValue)
+                local valueChangeBindingTable = getmetatable(reactiveTable).__valueChangeBindingTable
 
-        	local function rebuildChildBindingTable(reactiveTable)
-        		local reactiveMetaTable = getmetatable(reactiveTable)
-            	if type(v) == "table" then
-	            	buildChildBindingTable(reactiveMetaTable)
-	            end
-        	end
-
-        	local function compareOldBindValueWithNewBindValue(reactiveTable)
-            	-- compare if the old binding value is same as new one
-            	local reactiveMetaTable = getmetatable(reactiveTable)
-            	local bindingTable = getmetatable(reactiveTable).__bindingTable
-            	
-            	for k,v in pairs(bindingTable) do
-            		local bindingEnd = getBindingEnd(reactiveMetaTable, k)
-            		local newArrivable, newEndReactiveMetaTable, newEndBindingString, newEndValue = bindingEnd.arrivable, bindingEnd.reactiveMetaTable, bindingEnd.bindingKey, bindingEnd.bindingValue
-            		local oldArrivable, oldEndReactiveMetaTable, oldEndBindingString, oldEndValue = oldBindingValue[k][1], oldBindingValue[k][2], oldBindingValue[k][3], oldBindingValue[k][4]
-            		oldBindingValue[k] = nil
-
-            		if (newArrivable ~= oldArrivable) or (newEndValue ~= oldEndValue) then
-            			local callback = nil
-            			local oldReactiveTable = nil
-            			local newReactiveTable = nil
-            			local key = nil
-            			if newEndReactiveMetaTable then
-            				callback = newEndReactiveMetaTable.__bindingTable[newEndBindingString]
-            				newReactiveTable = newEndReactiveMetaTable.__reactiveTable
-            				key = newEndBindingString
-        				elseif oldEndReactiveMetaTable then
-        					callback = oldEndReactiveMetaTable.__bindingTable[oldEndBindingString]
-        					oldReactiveTable = oldEndReactiveMetaTable.__reactiveTable
-        					key = oldEndBindingString
-        				end
-        				if callback then
-        					arg = {}
-        					arg.oldValue = oldEndValue
-        					arg.newValue = newEndValue
-        					arg.oldReactiveTable = oldReactiveTable
-        					arg.newReactiveTable = newReactiveTable
-        					arg.key = key
-        					callback(arg)
-        				end
-            		end
-            	end
-        	end
-
-        	local function insertOrUpdateValue(k, v)
-        		local oldValue = realTable[k]
-	            local newValue = v
-	            if type(v) == "table" then
-	            	newValue = rt.getReactiveTable()
-	            	getmetatable(newValue).__keyInParentTable = k
-	            	getmetatable(newValue).__parentMetaTable = getmetatable(reactiveTable)
-	           		realTable[k] = newValue
-
-	            	for m, n in pairs(v) do
-		            	realTable[k][m] = n
-		            end
-		        else
-		        	realTable[k] = v
-	            end
-        	end
-
-        	-- if the key likes "2" then replace the key to "__2__" for binding
-	        k = transStringNumber(k)
-	        k = transNumber(k)
+                for bindingKey, bindingCallbacks in pairs(valueChangeBindingTable) do
+                    if bindingKey == k then
+                        thisUpdateValueChangeCallbackRecord[#thisUpdateValueChangeCallbackRecord + 1] = {
+                            callbacks = bindingCallbacks,
+                            oldValue = oldValue,
+                            newValue = v,
+                            key = k,
+                        }
+                    end
+                end
+            end
 
         	-- stackLevel is 1 when the fist level 
         	if realTable[k] ~= v then
-	        	stackLevel = stackLevel + 1
-	        	if stackLevel == 1 then
-		        	storeOldBindingValue(reactiveTable)
-		        end
+                k = transStringNumber(k)
+                k = transNumber(k)
 
-		        insertOrUpdateValue(k, v)
-	            
+	        	stackLevel = stackLevel + 1
+
+                if stackLevel == 1 then
+                    thisUpdateValueChangeCallbackRecord = {}
+                end
+
+                -- if is table then recurive insert all values to sub table
+                if type(v) == "table" then
+                    local subTable = rt.getReactiveTable()
+                    local subMetaTable = getmetatable(subTable)
+                    subMetaTable.__keyInParentTable = k
+                    subMetaTable.__parentMetaTable = getmetatable(reactiveTable)
+
+                    insertIntoThisUpdateValueChangeCallbackTable(realTable[k])
+                    realTable[k] = subTable
+
+                    for m, n in pairs(v) do
+                        realTable[k][m] = n     -- will recursively call __newIndex
+                    end
+                else
+                    -- store callback if current level of k is observed
+                    insertIntoThisUpdateValueChangeCallbackTable(realTable[k])
+                    realTable[k] = v
+                end
+
 	            if stackLevel == 1 then
-	            	rebuildChildBindingTable(reactiveTable)
-	            	compareOldBindValueWithNewBindValue(reactiveTable)
+	            	local reactiveMetaTable = getmetatable(reactiveTable)
+                    -- if is table then rebuild sub table valueChangeBindingTable
+                    if type(v) == "table" then
+                        buildSubTableBuidingTable(reactiveMetaTable)
+                    end
+                    for k,v in pairs(thisUpdateValueChangeCallbackRecord) do
+                        local callbacks = v.callbacks
+                        for m, n in pairs(callbacks) do
+                            m{
+                                newValue = v.newValue, 
+                                oldValue = v.oldValue, 
+                                key = v.key
+                            }
+                        end
+                    end
 	            end
 
 	            stackLevel = stackLevel - 1
@@ -529,45 +500,38 @@ function rt.getReactiveTable(initTable)
     return reactiveTable
 end
 
+local function tableLength(t)
+    local len = 0
+    for k,v in pairs(t) do
+        len = len + 1
+    end
+    return len
+end
+
+function rt.getLuaTable(reactiveTable)
+    local target = {}
+    for k, v in rt.pairs(reactiveTable) do
+        if type(v) == "table" then
+            target[k] = rt.getLuaTable(v)
+        else
+            target[k] = v
+        end
+    end
+    return target
+end
+
 
 -- @return
 -- 		newValue, 
 -- 		oldValue,
 --		key
-function rt.bindVariableChange(reactiveTable, bindingString, callback)
-	local function coreCallback(arg)
-		local ret = {
-			newValue = arg.newValue,
-			oldValue = arg.oldValue,
-			key = arg.key
-		}
-		callback(ret)
-	end
-	InsertVariableChangeBinding(getmetatable(reactiveTable), bindingString, coreCallback)
+function rt.bindValueChange(reactiveTable, bindingString, callback)
+    InsertValueChangeBinding(getmetatable(reactiveTable), bindingString, callback)
 end
 
-function rt.unbindVariableChange(reactiveTable, bindingString)
-	DeleteBinding(getmetatable(reactiveTable), bindingString)
-end
-
-function rt.unbindAllVariableChange(reactiveTable)
-	DeleteAllBindings(getmetatable(reactiveTable))
-end
-
-function rt.getLuaTable(reactiveTable)
-	local target = {}
-	for k, v in rt.pairs(reactiveTable) do
-		if type(v) == "table" then
-			target[k] = rt.getLuaTable(v)
-		else
-			target[k] = v
-		end
-	end
-	return target
-end
-
-function rt.bindTableInsert()
-    
+-- if no callback then remove all observer of one binding
+function rt.unbindValueChange(reactiveTable, bindingString, callback)
+    DeleteBinding(getmetatable(reactiveTable), bindingString, callback)
 end
 
 return rt
