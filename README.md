@@ -10,6 +10,8 @@ v0.3 2016/8/5 fix bug
 
 v0.4:2016/8/7 fix binding bug, add new interfaces
 
+v0.5:2016/8/9 big refactor and merge test with examples
+
 todo:
 
 add detection of table insert and table remove
