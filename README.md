@@ -1,4 +1,4 @@
-# reactiveTable v0.4 -- a table for lua to detect variable change and table change
+# reactiveTable v0.6 -- a table for lua to detect variable change and table change
 
 versions:
 
