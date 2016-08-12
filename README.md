@@ -16,6 +16,8 @@ v0.5:2016/8/9 big refactor and merge test with examples
 
 v0.6:2016/8/11 finish value change binding and table modify binding. need to do a lot of tests
 
+v0.7:2016/8/12 getReactiveTable big fix and other lots of bugs
+
 todo:
 
-need tons of test
+more friendly binding mechanism
