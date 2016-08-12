@@ -520,6 +520,31 @@ end)
 reactiveTable.a = {}
 dumpResult(time1 == 1, "indirectly set observable nil can also trigger a callback")
 
+local reactiveTable = rt.getReactiveTable({
+	a = {
+		b = {
+			1,2,3,
+			c = {
+
+			}
+		},
+		[2] = 2,
+		["2"] = "string2"
+	},
+	[2] = 8,
+	["2"] = 811,
+})
+
+local t = {}
+local time1 = 0
+rt.bindValueChange(reactiveTable, "a.\"2\"", function(arg)
+	dumpResult(arg.newValue == "string2" and arg.oldValue == nil and arg.key == "\"2\"","callback once when binding")
+end, true)
+
+rt.bindValueChange(reactiveTable, "a.\"2222\"", function(arg)
+	dumpResult(arg.newValue == nil and arg.oldValue == nil and arg.key == "\"2222\"", "callback once when binding")
+end, true)
+
 -- test rt.unbindValueChange
 rt.dump("----------------------------------------")
 rt.dump("test rt.unbindValueChange")
@@ -670,29 +695,29 @@ rt.bindTableModify(reactiveTable, "a", function(arg)
 	if time1 == 1 then
 		-- rt.dump(arg)
 		dumpResult(
-			arg.modifyTable[1].newValue == 1 
-				and arg.modifyTable[1].oldValue == 2
-				and #arg.removeTable == 0
-				and #arg.insertTable == 0, 
-			"callback will bring modifyTable, insertTable, removeTable, table, and key"
+			arg.modifyFields[1].newValue == 1 
+				and arg.modifyFields[1].oldValue == 2
+				and #arg.removeFields == 0
+				and #arg.insertFields == 0, 
+			"callback will bring modifyFields, insertFields, removeFields, table, and key"
 			)
 	elseif time1 == 2 then
 		dumpResult(
-			arg.removeTable[1].oldValue == "string2" 
-				and arg.removeTable[1].key == "2"
-				and #arg.insertTable == 0
-				and #arg.modifyTable == 0,
-			"callback will bring modifyTable, insertTable, removeTable, table, and key"
+			arg.removeFields[1].oldValue == "string2" 
+				and arg.removeFields[1].key == "2"
+				and #arg.insertFields == 0
+				and #arg.modifyFields == 0,
+			"callback will bring modifyFields, insertFields, removeFields, table, and key"
 			)
 	elseif time1 == 3 then
 		dumpResult(
 			getTestIndex(),
-			arg.insertTable[1].newValue == "hello world"
-				and arg.insertTable[1].oldValue == nil
-				and arg.insertTable[1].key == "new"
-				and #arg.modifyTable == 0
-				and #arg.removeTable == 0,
-			"callback will bring modifyTable, insertTable, removeTable, table, and key"
+			arg.insertFields[1].newValue == "hello world"
+				and arg.insertFields[1].oldValue == nil
+				and arg.insertFields[1].key == "new"
+				and #arg.modifyFields == 0
+				and #arg.removeFields == 0,
+			"callback will bring modifyFields, insertFields, removeFields, table, and key"
 			)
 	end
 end)
@@ -768,6 +793,48 @@ end)
 reactiveTable.a.b.c = {1,2,3,44,55, "2"}
 dumpResult(time1 == 1, "multiple change once lead only one callback")
 
+local reactiveTable = rt.getReactiveTable({
+	a = {
+		b = {
+			1,2,3,
+			c = {
+				1,2,3,4,5,"2",66
+			}
+		},
+		[2] = 2,
+		["2"] = "string2"
+	},
+	[2] = 8,
+	["2"] = 811,
+})
+local time1 = 0
+rt.bindTableModify(reactiveTable, "a.b.c", function(arg)
+	time1 = time1 + 1
+	dumpResult(arg.table[6] == "2", "callback once when binding")
+end, true)
+dumpResult(time1 ~= 0)
+
+local reactiveTable = rt.getReactiveTable({
+	a = {
+		b = {
+			1,2,3,
+			c = {
+				1,2,3,4,5,"2",66
+			}
+		},
+		[2] = 2,
+		["2"] = "string2"
+	},
+	[2] = 8,
+	["2"] = 811,
+})
+
+local time1 = 0
+rt.bindTableModify(reactiveTable, "a.b.ca", function(arg)
+	time1 = time1 + 1
+	dumpResult(arg.table == nil)
+end, true)
+dumpResult(time1 == 1)
 
 -- test rt.unbindTableModify
 rt.dump("----------------------------------------")

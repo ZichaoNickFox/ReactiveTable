@@ -37,6 +37,7 @@ versions:
 	v0.4:2016/8/7 fix binding bug, add new interfaces
     v0.5:2016/8/9 big refactor and merge test with examples
     v0.6:2016/8/11 finish value change binding and table modify binding. need to do a lot of tests
+    v0.7:2016/8/12 getReactiveTable big fix and other lots of bugs
 ]]
 
 -- public binding interface:
@@ -119,6 +120,14 @@ local function revertNumber(k)
         k = tonumber(k)
     end
     return k
+end
+
+local function tableLength(t)
+    local len = 0
+    for k,v in rt.pairs(t) do
+        len = len + 1
+    end
+    return len
 end
 
 function rt.getLuaTable(reactiveTable)
@@ -324,7 +333,7 @@ local function getBindingRoot(reactiveMetaTable, bindingString)
 end
 
 -- insert new binding string from any level of a table tree
-local function insertValueChangeBinding(reactiveMetaTable, bindingString, callback)
+local function insertValueChangeBinding(reactiveMetaTable, bindingString, callback, callbackOnceWhenBinding)
     local rootReactiveMetaTable, rootUnbindingString = getBindingRoot(reactiveMetaTable, bindingString)
 
 	IterToEnd(
@@ -333,101 +342,107 @@ local function insertValueChangeBinding(reactiveMetaTable, bindingString, callba
 		function(reactiveMetaTable, bindingString)
 			-- add to valueChangeBindingTable, ingore whether there is a key, because the key may have in future
 			local valueChangeBindingTable = reactiveMetaTable.__valueChangeBindingTable
-            if not reactiveMetaTable.__valueChangeBindingTable[bindingString] then
-                reactiveMetaTable.__valueChangeBindingTable[bindingString] = {}
+            if not valueChangeBindingTable[bindingString] then
+                valueChangeBindingTable[bindingString] = {}
             end
-			reactiveMetaTable.__valueChangeBindingTable[bindingString][callback] = true
+			valueChangeBindingTable[bindingString][callback] = true
+            if callbackOnceWhenBinding and isBindingEnd(bindingString) then
+                callback{
+                    newValue = reactiveMetaTable.__realTable[bindingString],
+                    oldValue = nil,
+                    key = bindingString
+                }
+            end
 		end
 		)
 end
 
-local function InsertTableModifyBinding(reactiveMetaTable, bindingString, callback)
-    local rootReactiveMetaTable, rootUnbindingString = getBindingRoot(reactiveMetaTable, bindingString)
+local function InsertFieldsModifyBinding(reactiveMetaTable, bindingString, callback, callbackOnceWhenBinding)
+    local rootReactiveMetaTable, rootBindingString = getBindingRoot(reactiveMetaTable, bindingString)
 
     IterToEnd(
         rootReactiveMetaTable, 
-        rootUnbindingString,
+        rootBindingString,
         function(reactiveMetaTable, bindingString)
-            -- add to valueChangeBindingTable, ingore whether there is a key, because the key may have in future
-            local valueChangeBindingTable = reactiveMetaTable.__tableModifyBindingTable
-            if not reactiveMetaTable.__tableModifyBindingTable[bindingString] then
-                reactiveMetaTable.__tableModifyBindingTable[bindingString] = {}
+            -- add to tableModifyBindingTable, ingore whether there is a key, because the key may have in future
+            local tableModifyBindingTable = reactiveMetaTable.__tableModifyBindingTable
+            if not tableModifyBindingTable[bindingString] then
+                tableModifyBindingTable[bindingString] = {}
             end
-            reactiveMetaTable.__tableModifyBindingTable[bindingString][callback] = true
+            tableModifyBindingTable[bindingString][callback] = true
+            if callbackOnceWhenBinding and isBindingEnd(bindingString) then
+                -- rt.dump(reactiveMetaTable)
+                -- os.exit()
+                -- here may be lead stack too deep exception
+                local t = reactiveMetaTable.__realTable[bindingString]
+                callback{
+                    table = t ~= nil and rt.getLuaTable(t) or nil
+                }
+            end
         end
         )
 end
 
-local function deleteValueChangeBindingForSubTables(reactiveMetaTable, unbindingString, callback)
-	local valueChangeBindingTable = reactiveMetaTable.__valueChangeBindingTable
-	local realTable = reactiveMetaTable.__realTable
-
-	for k,v in pairs(valueChangeBindingTable) do
-		if k == unbindingString then
-            if callback then
-                if valueChangeBindingTable[tostring(k)][callback] then
-			        valueChangeBindingTable[tostring(k)][callback] = nil
-                else
-                    rt.dump("Warning : you try to remove a binding which have not bound to this reactive table")
-                end
-            else
-                valueChangeBindingTable[tostring(k)] = nil
-            end
-		end
-	end
-    local subTable = realTable[getNextBindingKey(unbindingString)]
-    local subBindingString = cutBindingString(unbindingString)
-	if subBindingString ~= "" then
-		deleteValueChangeBindingForSubTables(getmetatable(subTable), subBindingString, callback)
-	end
-end
-
-local function deleteTableModifyBindingForSubTables(reactiveMetaTable, unbindingString, callback)
-    local tableModifyBindingTable = reactiveMetaTable.__tableModifyBindingTable
-    local realTable = reactiveMetaTable.__realTable
-
-    for k,v in pairs(tableModifyBindingTable) do
-        if k == unbindingString then
-            if callback then
-                if tableModifyBindingTable[tostring(k)][callback] then
-                    tableModifyBindingTable[tostring(k)][callback] = nil
-                else
-                    rt.dump("Warning : you try to remove a binding which have not bound to this reactive table")
-                end
-            else
-                tableModifyBindingTable[tostring(k)] = nil
-            end
-        end
-    end
-    local subTable = realTable[getNextBindingKey(unbindingString)]
-    local subBindingString = cutBindingString(unbindingString)
-    if subBindingString ~= "" then
-        deleteTableModifyBindingForSubTables(getmetatable(subTable), subBindingString, callback)
-    end
-end
-
 local function deleteValueChangeBinding(reactiveMetaTable, unbindingString, callback)
 	local rootReactiveMetaTable, rootUnbindingString = getBindingRoot(reactiveMetaTable, unbindingString)
-	deleteValueChangeBindingForSubTables(rootReactiveMetaTable, rootUnbindingString, callback)
+    IterToEnd(
+        rootReactiveMetaTable, 
+        rootUnbindingString,
+        function(reactiveMetaTable, unbindingString)
+            local valueChangeBindingTable = reactiveMetaTable.__valueChangeBindingTable
+            for k, v in pairs(valueChangeBindingTable) do
+                if k == unbindingString then
+                    if callback then
+                        local testFound = false
+                        for m, n in pairs(v) do
+                            if m == callback then
+                                testFound = true
+                                v[m] = nil
+                            end
+                        end
+                        if testFound == false then
+                            rt.dump(debug.traceback())
+                            rt.dump("deleteValueChangeBinding Error : cannot find unbindingString, you may not bind " .. unbindingString .. " to this reactive table")
+                        end
+                    end
+                    if tableLength(v) == 0 or not callback then
+                        valueChangeBindingTable[k] = nil
+                    end
+                end
+            end
+        end
+        )
 end
 
 local function deleteTableModifyBinding(reactiveMetaTable, unbindingString, callback)
     local rootReactiveMetaTable, rootUnbindingString = getBindingRoot(reactiveMetaTable, unbindingString)
-    deleteTableModifyBindingForSubTables(rootReactiveMetaTable, rootUnbindingString, callback)
-end
-
-local function buildSubBindingTable(reactiveMetaTable)
-	for k,v in pairs(reactiveMetaTable.__valueChangeBindingTable) do
-		local callback = reactiveMetaTable.__valueChangeBindingTable[k]
-
-		IterToEnd(
-			reactiveMetaTable,
-			k,
-			function(iterReactiveMetaTable, iterKey)
-				iterReactiveMetaTable.__valueChangeBindingTable[iterKey] = callback
-			end
-			)
-	end
+    IterToEnd(
+        rootReactiveMetaTable, 
+        rootUnbindingString,
+        function(reactiveMetaTable, unbindingString)
+            local tableModifyBindingTable = reactiveMetaTable.__tableModifyBindingTable
+            for k, v in pairs(tableModifyBindingTable) do
+                if k == unbindingString then
+                    if callback then
+                        local testFound = false
+                        for m, n in pairs(v) do
+                            if m == callback then
+                                testFound = true
+                                v[m] = nil
+                            end
+                        end
+                        if testFound == false then
+                            rt.dump(debug.traceback())
+                            rt.dump("deleteTableModifyBinding Error : cannot find unbindingString, you may not bind " .. unbindingString .. " to this reactive table")
+                        end
+                    end
+                    if tableLength(v) == 0 or not callback then
+                        tableModifyBindingTable[k] = nil
+                    end
+                end
+            end
+        end
+        )
 end
 
 local function transStringNumber(k)
@@ -533,9 +548,40 @@ function rt.getReactiveTable(initTable)
 
         	local function rebuildSubBindingTable(reactiveTable)
         		local reactiveMetaTable = getmetatable(reactiveTable)
-            	if type(v) == "table" then
-	            	buildSubBindingTable(reactiveMetaTable)
-	            end
+            	
+                for k,v in pairs(reactiveMetaTable.__valueChangeBindingTable) do
+                    local callbacks = reactiveMetaTable.__valueChangeBindingTable[k]
+
+                    IterToEnd(
+                        reactiveMetaTable,
+                        k,
+                        function(iterReactiveMetaTable, iterKey)
+                            for k, v in pairs(callbacks) do
+                                if not iterReactiveMetaTable.__valueChangeBindingTable[iterKey] then
+                                    iterReactiveMetaTable.__valueChangeBindingTable[iterKey] = {}
+                                end
+                                iterReactiveMetaTable.__valueChangeBindingTable[iterKey][k] = v
+                            end
+                        end
+                        )
+                end
+
+                for k,v in pairs(reactiveMetaTable.__tableModifyBindingTable) do
+                    local callbacks = reactiveMetaTable.__tableModifyBindingTable[k]
+
+                    IterToEnd(
+                        reactiveMetaTable,
+                        k,
+                        function(iterReactiveMetaTable, iterKey)
+                            for k, v in pairs(callbacks) do
+                                if not iterReactiveMetaTable.__tableModifyBindingTable[iterKey] then
+                                    iterReactiveMetaTable.__tableModifyBindingTable[iterKey] = {}
+                                end
+                                iterReactiveMetaTable.__tableModifyBindingTable[iterKey][k] = v
+                            end
+                        end
+                        )                
+                end
         	end
 
         	local function compareOldValueChangeBindingValueWithNew(reactiveTable)
@@ -566,10 +612,10 @@ function rt.getReactiveTable(initTable)
         				if callbacks then
                             for m, n in pairs(callbacks) do
             					arg = {}
-            					arg.oldValue = oldEndValue
-            					arg.newValue = newEndValue
-            					arg.oldReactiveTable = oldReactiveTable
-            					arg.newReactiveTable = newReactiveTable
+            					arg.oldValue = type(oldEndValue) == "table" and rt.getLuaTable(oldEndValue) or oldEndValue
+            					arg.newValue = type(newEndValue) == "table" and rt.getLuaTable(newEndValue) or newEndValue
+            					-- arg.oldReactiveTable = oldReactiveTable
+            					-- arg.newReactiveTable = newReactiveTable
             					arg.key = key
             					m(arg)
                             end
@@ -580,22 +626,20 @@ function rt.getReactiveTable(initTable)
 
             local function compareOldTableModifyBindingValueWithNew(reactiveTable)
                 local function compareDifference(oldEndValue, newEndValue)
-                    -- print(111111111)
-                    -- rt.dump(oldEndValue, newEndValue)
                     local isDifferent = false
-                    local removeTable = {}
-                    local insertTable = {}
-                    local modifyTable = {}
+                    local removeFields = {}
+                    local insertFields = {}
+                    local modifyFields = {}
                     for k, v in rt.pairs(newEndValue) do
                         if newEndValue[k] ~= oldEndValue[k] then
                             isDifferent = true
                             if oldEndValue[k] == nil then
-                                insertTable[#insertTable + 1] = {
+                                insertFields[#insertFields + 1] = {
                                     newValue = newEndValue[k],
                                     key = k
                                 }
                             elseif oldEndValue[k] ~= nil then
-                                modifyTable[#modifyTable + 1] = {
+                                modifyFields[#modifyFields + 1] = {
                                     oldValue = oldEndValue[k],
                                     newValue = newEndValue[k],
                                     key = k
@@ -606,16 +650,16 @@ function rt.getReactiveTable(initTable)
                     end
                     for k, v in rt.pairs(oldEndValue) do
                         isDifferent = true
-                        removeTable[#removeTable + 1] = {
+                        removeFields[#removeFields + 1] = {
                             oldValue = oldEndValue[k],
                             key = k
                         }
                     end
                     return {
                         isDifferent = isDifferent, 
-                        removeTable = removeTable, 
-                        insertTable = insertTable, 
-                        modifyTable = modifyTable
+                        removeFields = removeFields, 
+                        insertFields = insertFields, 
+                        modifyFields = modifyFields
                     }
                 end
                 -- compare if the old binding value is same as new one
@@ -648,13 +692,14 @@ function rt.getReactiveTable(initTable)
                             if callbacks then
                                 for m, n in pairs(callbacks) do
                                     arg = {}
-                                    arg.removeTable = compareResult.removeTable
-                                    arg.insertTable = compareResult.insertTable
-                                    arg.modifyTable = compareResult.modifyTable
-                                    arg.oldValue = oldEndValue
-                                    arg.newValue = newEndValue
-                                    arg.oldReactiveTable = oldReactiveTable
-                                    arg.newReactiveTable = newReactiveTable
+                                    arg.removeFields = compareResult.removeFields
+                                    arg.insertFields = compareResult.insertFields
+                                    arg.modifyFields = compareResult.modifyFields
+                                    -- arg.oldValue = oldEndValue
+                                    -- arg.newValue = newEndValue
+                                    -- arg.oldReactiveTable = oldReactiveTable
+                                    -- arg.newReactiveTable = newReactiveTable
+                                    arg.table = type(newEndValue) == "table" and rt.getLuaTable(newEndValue) or newEndValue
                                     arg.key = key
                                     m(arg)
                                 end
@@ -694,12 +739,15 @@ function rt.getReactiveTable(initTable)
 		        end
 
 		        insertOrUpdateValue(k, v)
-	            
+                
 	            if stackLevel == 1 then
-	            	rebuildSubBindingTable(reactiveTable)
+                    if type(v) == "table" then
+	            	    rebuildSubBindingTable(reactiveTable)
+                    end
+
 	            	compareOldValueChangeBindingValueWithNew(reactiveTable)
                     compareOldTableModifyBindingValueWithNew(reactiveTable)
-	            end
+                end
 
 	            stackLevel = stackLevel - 1
 	        end
@@ -716,20 +764,12 @@ function rt.getReactiveTable(initTable)
     return reactiveTable
 end
 
-local function tableLength(t)
-    local len = 0
-    for k,v in pairs(t) do
-        len = len + 1
-    end
-    return len
-end
-
 -- @return
 -- 		newValue, 
 -- 		oldValue,
 --		key
-function rt.bindValueChange(reactiveTable, bindingString, callback)
-    insertValueChangeBinding(getmetatable(reactiveTable), bindingString, callback)
+function rt.bindValueChange(reactiveTable, bindingString, callback, callbackOnceWhenBinding)
+    insertValueChangeBinding(getmetatable(reactiveTable), bindingString, callback, callbackOnceWhenBinding or false)
 end
 
 -- if no callback then remove all observer of one binding
@@ -737,8 +777,8 @@ function rt.unbindValueChange(reactiveTable, bindingString, callback)
     deleteValueChangeBinding(getmetatable(reactiveTable), bindingString, callback)
 end
 
-function rt.bindTableModify(reactiveTable, bindingString, callback)
-    InsertTableModifyBinding(getmetatable(reactiveTable), bindingString, callback)
+function rt.bindTableModify(reactiveTable, bindingString, callback, callbackOnceWhenBinding)
+    InsertFieldsModifyBinding(getmetatable(reactiveTable), bindingString, callback, callbackOnceWhenBinding or false)
 end
 
 function rt.unbindTableModify(reactiveTable, bindingString, callback)
